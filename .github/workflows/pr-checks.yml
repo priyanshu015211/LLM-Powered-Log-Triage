@@ -1,45 +1,32 @@
-## Description
+name: PR Checks
 
-<!-- What does this PR change? -->
+on:
+  pull_request:
+    branches:
+      - main
 
-## Related Issue
+permissions:
+  contents: read
 
-<!-- Example: Closes #123 -->
+jobs:
+  test:
+    name: Test and Validate
+    runs-on: ubuntu-latest
 
-## Type of Change
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
 
-- [ ] Bug fix
-- [ ] New feature
-- [ ] Enhancement
-- [ ] Refactoring
-- [ ] Documentation
-- [ ] Test
-- [ ] Research / Experiment
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
-## Changes Made
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-- 
-- 
-- 
-
-## Testing
-
-- [ ] Added/updated tests
-- [ ] Existing tests pass
-- [ ] Tested locally
-
-## Checklist
-
-- [ ] Code follows the existing project structure
-- [ ] No API keys or secrets were committed
-- [ ] No unnecessary files were added
-- [ ] Documentation updated if required
-- [ ] Tests added or updated where appropriate
-
-## Screenshots / Output
-
-<!-- Add screenshots or example output if relevant. -->
-
-## Additional Notes
-
-<!-- Anything reviewers should know? -->
+      - name: Run tests
+        run: |
+          pytest -q
