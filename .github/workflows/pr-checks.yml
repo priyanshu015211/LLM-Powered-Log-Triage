@@ -29,4 +29,4 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest -q
+          Run PYTHONPATH="$GITHUB_WORKSPACE" python -m pytest -q
