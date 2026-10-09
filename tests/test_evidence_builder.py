@@ -106,8 +106,8 @@ def test_builder_keeps_support_and_contradiction_explicit_and_preserves_directio
              polarity="contradicting", score=0.70, relation="conflicting_pattern"),
     ]
     result = builder.build_candidate("E02", links, severity_score=0.80)
-    assert result.supporting_events == ["E01"]
-    assert result.contradicting_events == ["E03"]
+    assert result.supporting_events == ("E01",)
+    assert result.contradicting_events == ("E03",)
     assert result.temporal_score == 0.90
     assert result.semantic_score is None
     assert result.severity_score == 0.80
@@ -122,16 +122,16 @@ def test_link_polarity_is_scoped_to_candidate_not_both_endpoints():
     relation = link("E01", "E02", candidate="E02")
     target_result = builder.build_candidate("E02", [relation])
     source_result = builder.build_candidate("E01", [relation])
-    assert target_result.supporting_events == ["E01"]
-    assert source_result.supporting_events == []
-    assert source_result.evidence_items == []
+    assert target_result.supporting_events == ("E01",)
+    assert source_result.supporting_events == ()
+    assert source_result.evidence_items == ()
 
 
 def test_source_endpoint_can_be_candidate_when_explicitly_selected():
     builder = make_builder("E01", "E02")
     relation = link("E01", "E02", candidate="E01", relation="precedes")
     result = builder.build_candidate("E01", [relation])
-    assert result.supporting_events == ["E02"]
+    assert result.supporting_events == ("E02",)
     assert result.evidence_items[0].event_id == "E02"
     assert result.evidence_items[0].source_event_id == "E01"
     assert result.evidence_items[0].target_event_id == "E02"
@@ -139,8 +139,8 @@ def test_source_endpoint_can_be_candidate_when_explicitly_selected():
 
 def test_builder_does_not_invent_contradiction_from_absence_of_support():
     result = make_builder("E01", "E02").build_candidate("E02", [])
-    assert result.supporting_events == []
-    assert result.contradicting_events == []
+    assert result.supporting_events == ()
+    assert result.contradicting_events == ()
     assert result.temporal_score is None
     assert result.contradiction_score is None
 
@@ -150,7 +150,7 @@ def test_builder_ignores_links_unrelated_to_candidate():
     unrelated = link("E01", "E02", candidate="E02", evidence_type=EvidenceType.DEPENDENCY,
                      relation="depends_on")
     result = builder.build_candidate("E03", [unrelated])
-    assert result.evidence_items == []
+    assert result.evidence_items == ()
 
 
 def test_builder_rejects_links_to_unknown_related_events():
@@ -170,7 +170,7 @@ def test_builder_uses_maximum_support_score_per_evidence_type():
     ]
     result = builder.build_candidate("E03", links)
     assert result.semantic_score == 0.80
-    assert result.supporting_events == ["E01", "E02"]
+    assert result.supporting_events == ("E01", "E02")
 
 
 def test_package_deduplicates_candidate_ids_and_keeps_candidate_relative_evidence():
@@ -187,8 +187,8 @@ def test_package_deduplicates_candidate_ids_and_keeps_candidate_relative_evidenc
     package = builder.build_package("INC-001", ["E02", "E01", "E02"], [link_dict])
     assert package.incident_id == "INC-001"
     assert [c.candidate_event_id for c in package.candidates] == ["E02", "E01"]
-    assert package.candidates[0].supporting_events == ["E01"]
-    assert package.candidates[1].supporting_events == []
+    assert package.candidates[0].supporting_events == ("E01",)
+    assert package.candidates[1].supporting_events == ()
 
 
 def test_duplicate_exact_links_are_deduplicated():
@@ -284,3 +284,29 @@ def test_package_json_round_trip():
     package = builder.build_package("INC-1", ["E02"], [link("E01", "E02", candidate="E02")])
     restored = EvidencePackage.model_validate_json(package.model_dump_json())
     assert restored == package
+
+
+def test_candidate_evidence_collections_are_immutable():
+    result = make_builder("E01", "E02").build_candidate(
+        "E02",
+        [link("E01", "E02", candidate="E02")],
+    )
+
+    with pytest.raises(AttributeError):
+        result.supporting_events.clear()
+
+    with pytest.raises(AttributeError):
+        result.evidence_items.append(result.evidence_items[0])
+
+    with pytest.raises(ValidationError):
+        result.supporting_events = ()
+
+
+def test_evidence_package_candidates_are_immutable():
+    package = make_builder("E01").build_package("INC-1", ["E01"], [])
+
+    with pytest.raises(AttributeError):
+        package.candidates.append(package.candidates[0])
+
+    with pytest.raises(ValidationError):
+        package.candidates = ()
