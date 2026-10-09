@@ -1,312 +1,297 @@
-from types import SimpleNamespace
+"""Validated data contracts for the deterministic evidence layer.
+Important: ``polarity`` is always interpreted relative to ``candidate_event_id``.
+A directional relation is not, by itself, proof of causation.
+"""
 
-import pytest
-from pydantic import ValidationError
+from __future__ import annotations
 
-from src.evidence import (
-    CandidateEvidence,
-    EvidenceBuilder,
-    EvidenceLink,
-    EvidencePackage,
-    EvidenceType,
-    EventStore,
-)
+import json
+from datetime import datetime
+from enum import StrEnum
+from typing import Any, Literal, Mapping
 
-
-def event(event_id, *, timestamp="2026-10-08T10:00:00", service="api", line=None):
-    """Canonical LogEvent-shaped fixture without importing Member 1's module."""
-    if line is None:
-        try:
-            line = int(event_id.removeprefix("E"))
-        except (AttributeError, ValueError):
-            line = 1
-    return SimpleNamespace(
-        event_id=event_id,
-        timestamp_iso=timestamp,
-        severity="ERROR",
-        service=service,
-        message=f"message for {event_id}",
-        template=f"template-{event_id}",
-        source_file="incident.log",
-        line_number=line,
-    )
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-def link(source, target, *, candidate, evidence_type=EvidenceType.TEMPORAL,
-         polarity="supporting", score=0.9, relation="precedes", reason=None, metadata=None):
-    values = {
-        "source_event_id": source,
-        "target_event_id": target,
-        "evidence_type": evidence_type,
-        "polarity": polarity,
-        "score": score,
-        "relation": relation,
-        "reason": reason,
-        "metadata": metadata or {},
-    }
-    values["candidate_event_id"] = candidate
-    return EvidenceLink(**values)
+class EvidenceType(StrEnum):
+    """Kind of signal represented by an evidence relationship."""
+
+    TEMPORAL = "temporal"
+    SEMANTIC = "semantic"
+    DEPENDENCY = "dependency"
 
 
-def make_builder(*ids):
-    return EvidenceBuilder(EventStore([event(event_id) for event_id in ids]))
+def _validate_identifier(value: str, field_name: str) -> str:
+    """Reject blank or padded identifiers instead of silently rewriting them."""
+    if not value or not value.strip():
+        raise ValueError(f"{field_name} must not be blank")
+    if value != value.strip():
+        raise ValueError(f"{field_name} must not have leading or trailing whitespace")
+    return value
 
 
-def test_event_store_preserves_traceable_ids_and_safe_snapshot():
-    store = EventStore([event("E01")])
-    snapshot = store.require("E01")
-    assert snapshot.event_id == "E01"
-    assert snapshot.timestamp_iso == "2026-10-08T10:00:00"
-    assert snapshot.service == "api"
-    assert snapshot.message == "message for E01"
-    assert not hasattr(snapshot, "raw_message")
-
-
-def test_event_store_rejects_duplicate_ids():
-    with pytest.raises(ValueError, match="Duplicate event_id: E01"):
-        EventStore([event("E01"), event("E01")])
-
-
-def test_event_store_rejects_unknown_event_id():
-    store = EventStore([event("E01")])
-    with pytest.raises(KeyError, match="Unknown event_id: E99"):
-        store.require("E99")
-
-
-def test_event_store_snapshot_is_immutable():
-    snapshot = EventStore([event("E01")]).require("E01")
-    with pytest.raises(ValidationError):
-        snapshot.event_id = "E99"
-
-
-def test_event_store_rejects_malformed_timestamp():
-    with pytest.raises(ValidationError, match="ISO-8601"):
-        EventStore([event("E01", timestamp="yesterday")])
-    with pytest.raises(ValidationError, match="ISO-8601"):
-        EventStore([event("E01", timestamp="2026-10-08")])
-
-
-def test_event_store_rejects_boolean_line_number():
-    with pytest.raises(ValueError, match="non-integer line_number"):
-        EventStore([event("E01", line=True)])
-
-
-def test_event_store_rejects_blank_or_padded_ids():
-    with pytest.raises(ValueError, match="non-empty event_id"):
-        EventStore([event("   ")])
-    with pytest.raises(ValueError, match="leading or trailing whitespace"):
-        EventStore([event(" E01 ")])
-
-
-def test_builder_keeps_support_and_contradiction_explicit_and_preserves_direction():
-    builder = make_builder("E01", "E02", "E03")
-    links = [
-        link("E01", "E02", candidate="E02", score=0.90, relation="precedes"),
-        link("E03", "E02", candidate="E02", evidence_type=EvidenceType.SEMANTIC,
-             polarity="contradicting", score=0.70, relation="conflicting_pattern"),
-    ]
-    result = builder.build_candidate("E02", links, severity_score=0.80)
-    assert result.supporting_events == ("E01",)
-    assert result.contradicting_events == ("E03",)
-    assert result.temporal_score == 0.90
-    assert result.semantic_score is None
-    assert result.severity_score == 0.80
-    assert result.contradiction_score == 0.70
-    assert result.evidence_items[0].source_event_id == "E01"
-    assert result.evidence_items[0].target_event_id == "E02"
-
-
-def test_link_polarity_is_scoped_to_candidate_not_both_endpoints():
-    builder = make_builder("E01", "E02")
-    # The caller must explicitly say polarity is being evaluated for E02.
-    relation = link("E01", "E02", candidate="E02")
-    target_result = builder.build_candidate("E02", [relation])
-    source_result = builder.build_candidate("E01", [relation])
-    assert target_result.supporting_events == ("E01",)
-    assert source_result.supporting_events == ()
-    assert source_result.evidence_items == ()
-
-
-def test_source_endpoint_can_be_candidate_when_explicitly_selected():
-    builder = make_builder("E01", "E02")
-    relation = link("E01", "E02", candidate="E01", relation="precedes")
-    result = builder.build_candidate("E01", [relation])
-    assert result.supporting_events == ("E02",)
-    assert result.evidence_items[0].event_id == "E02"
-    assert result.evidence_items[0].source_event_id == "E01"
-    assert result.evidence_items[0].target_event_id == "E02"
-
-
-def test_builder_does_not_invent_contradiction_from_absence_of_support():
-    result = make_builder("E01", "E02").build_candidate("E02", [])
-    assert result.supporting_events == ()
-    assert result.contradicting_events == ()
-    assert result.temporal_score is None
-    assert result.contradiction_score is None
-
-
-def test_builder_ignores_links_unrelated_to_candidate():
-    builder = make_builder("E01", "E02", "E03")
-    unrelated = link("E01", "E02", candidate="E02", evidence_type=EvidenceType.DEPENDENCY,
-                     relation="depends_on")
-    result = builder.build_candidate("E03", [unrelated])
-    assert result.evidence_items == ()
-
-
-def test_builder_rejects_links_to_unknown_related_events():
-    builder = make_builder("E01")
-    bad_link = link("E01", "E99", candidate="E01", relation="precedes")
-    with pytest.raises(KeyError, match="Unknown event_id: E99"):
-        builder.build_candidate("E01", [bad_link])
-
-
-def test_builder_uses_maximum_support_score_per_evidence_type():
-    builder = make_builder("E01", "E02", "E03")
-    links = [
-        link("E01", "E03", candidate="E03", evidence_type=EvidenceType.SEMANTIC,
-             score=0.50, relation="similar_template"),
-        link("E02", "E03", candidate="E03", evidence_type=EvidenceType.SEMANTIC,
-             score=0.80, relation="similar_template"),
-    ]
-    result = builder.build_candidate("E03", links)
-    assert result.semantic_score == 0.80
-    assert result.supporting_events == ("E01", "E02")
-
-
-def test_package_deduplicates_candidate_ids_and_keeps_candidate_relative_evidence():
-    builder = make_builder("E01", "E02", "E03")
-    link_dict = {
-        "source_event_id": "E01",
-        "target_event_id": "E02",
-        "candidate_event_id": "E02",
-        "evidence_type": "temporal",
-        "polarity": "supporting",
-        "score": 0.9,
-        "relation": "precedes",
-    }
-    package = builder.build_package("INC-001", ["E02", "E01", "E02"], [link_dict])
-    assert package.incident_id == "INC-001"
-    assert [c.candidate_event_id for c in package.candidates] == ["E02", "E01"]
-    assert package.candidates[0].supporting_events == ("E01",)
-    assert package.candidates[1].supporting_events == ()
-
-
-def test_duplicate_exact_links_are_deduplicated():
-    builder = make_builder("E01", "E02")
-    evidence_link = link("E01", "E02", candidate="E02")
-    result = builder.build_candidate("E02", [evidence_link, evidence_link])
-    assert len(result.evidence_items) == 1
-
-
-def test_output_is_deterministic_when_link_order_changes():
-    builder = make_builder("E01", "E02", "E03")
-    links = [
-        link("E01", "E03", candidate="E03", score=0.7, relation="r1", reason="z"),
-        link("E02", "E03", candidate="E03", score=0.8, relation="r2", reason="a"),
-    ]
-    first = builder.build_candidate("E03", links).model_dump_json()
-    second = builder.build_candidate("E03", list(reversed(links))).model_dump_json()
-    assert first == second
-
-
-def test_evidence_link_rejects_out_of_range_nan_and_infinite_scores():
-    for bad_score in (1.01, -0.01, float("nan"), float("inf"), True, "0.9"):
-        with pytest.raises(ValidationError):
-            link("E01", "E02", candidate="E02", score=bad_score)
-
-
-def test_evidence_link_rejects_self_links_and_candidate_not_in_endpoints():
-    with pytest.raises(ValidationError, match="must differ"):
-        link("E01", "E01", candidate="E01")
-    with pytest.raises(ValidationError, match="must match source_event_id"):
-        link("E01", "E02", candidate="E03")
-
-
-def test_evidence_link_requires_explicit_candidate_scope():
-    with pytest.raises(ValidationError):
-        EvidenceLink(
-            source_event_id="E01",
-            target_event_id="E02",
-            evidence_type=EvidenceType.TEMPORAL,
-            polarity="supporting",
-            score=0.9,
-            relation="precedes",
+def _copy_json_object(value: Any) -> Any:
+    """Validate JSON compatibility and make a detached, deterministic copy."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise ValueError("metadata must be a JSON object")
+    try:
+        encoded = json.dumps(
+            dict(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
         )
+        copied = json.loads(encoded)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("metadata must contain only JSON-serializable values") from exc
+    if not isinstance(copied, dict):  # Defensive; the Mapping check already implies this.
+        raise ValueError("metadata must be a JSON object")
+    return copied
 
 
-def test_evidence_link_rejects_non_json_metadata():
-    with pytest.raises(ValidationError, match="JSON-serializable"):
-        link("E01", "E02", candidate="E02", metadata={"bad": object()})
+class EventSnapshot(BaseModel):
+    """Small, validated view of an event suitable for evidence references.
+    ``message`` and ``template`` may still contain sensitive log content. This
+    model is not a redaction boundary; sanitize secrets before constructing it
+    if the underlying logs may contain credentials or personal data.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    event_id: str = Field(min_length=1)
+    timestamp_iso: str | None = None
+    severity: str | None = None
+    service: str | None = None
+    message: str
+    template: str | None = None
+    source_file: str | None = None
+    line_number: int | None = Field(default=None, ge=1, strict=True)
+
+    @field_validator("event_id")
+    @classmethod
+    def validate_event_id(cls, value: str) -> str:
+        return _validate_identifier(value, "event_id")
+
+    @field_validator("timestamp_iso")
+    @classmethod
+    def validate_timestamp_iso(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if value != value.strip() or not ("T" in value or " " in value):
+            raise ValueError("timestamp_iso must be a valid ISO-8601 datetime")
+        try:
+            # Python's ISO parser accepts offsets and the common terminal Z form.
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("timestamp_iso must be a valid ISO-8601 datetime") from exc
+        return value
 
 
-def test_evidence_link_detaches_metadata_from_caller_mutations():
-    metadata = {"path": {"hops": ["a", "b"]}}
-    item = link("E01", "E02", candidate="E02", metadata=metadata)
-    metadata["path"]["hops"].append("mutated")
-    assert item.metadata == {"path": {"hops": ["a", "b"]}}
+class EvidenceLink(BaseModel):
+    """Directional relationship whose polarity is scoped to one candidate.
+    ``candidate_event_id`` is required because relation direction varies by
+    evidence type. The producer must state which candidate the polarity is
+    about; the builder never guesses from source/target direction.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_event_id: str = Field(min_length=1)
+    target_event_id: str = Field(min_length=1)
+    candidate_event_id: str
+    evidence_type: EvidenceType
+    polarity: Literal["supporting", "contradicting"]
+    score: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    relation: str = Field(min_length=1)
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("source_event_id", "target_event_id", "candidate_event_id")
+    @classmethod
+    def validate_ids(cls, value: str, info: Any) -> str:
+        return _validate_identifier(value, info.field_name)
+
+    @field_validator("relation")
+    @classmethod
+    def validate_relation(cls, value: str) -> str:
+        return _validate_identifier(value, "relation")
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def validate_metadata(cls, value: Any) -> dict[str, Any]:
+        return _copy_json_object(value)
+
+    @model_validator(mode="after")
+    def validate_relationship(self) -> "EvidenceLink":
+        if self.source_event_id == self.target_event_id:
+            raise ValueError("source_event_id and target_event_id must differ")
+        if self.candidate_event_id not in {self.source_event_id, self.target_event_id}:
+            raise ValueError(
+                "candidate_event_id must match source_event_id or target_event_id"
+            )
+        return self
 
 
-def test_schema_rejects_candidate_snapshot_mismatch():
-    snapshot = EventStore([event("E01")]).require("E01")
-    with pytest.raises(ValidationError, match="must equal candidate.event_id"):
-        CandidateEvidence(candidate_event_id="E02", candidate=snapshot)
+class EvidenceItem(BaseModel):
+    """Validated evidence retained for a single candidate.
+    Both endpoints are kept so temporal/dependency direction is not lost when
+    the link is converted into an evidence package.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidate_event_id: str = Field(min_length=1)
+    event_id: str = Field(min_length=1)  # The endpoint other than the candidate.
+    source_event_id: str = Field(min_length=1)
+    target_event_id: str = Field(min_length=1)
+    evidence_type: EvidenceType
+    polarity: Literal["supporting", "contradicting"]
+    score: float = Field(strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    relation: str = Field(min_length=1)
+    reason: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("candidate_event_id", "event_id", "source_event_id", "target_event_id")
+    @classmethod
+    def validate_ids(cls, value: str, info: Any) -> str:
+        return _validate_identifier(value, info.field_name)
+
+    @field_validator("relation")
+    @classmethod
+    def validate_relation(cls, value: str) -> str:
+        return _validate_identifier(value, "relation")
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def validate_metadata(cls, value: Any) -> dict[str, Any]:
+        return _copy_json_object(value)
+
+    @model_validator(mode="after")
+    def validate_relationship(self) -> "EvidenceItem":
+        if self.source_event_id == self.target_event_id:
+            raise ValueError("source_event_id and target_event_id must differ")
+        if self.candidate_event_id == self.source_event_id:
+            expected_related = self.target_event_id
+        elif self.candidate_event_id == self.target_event_id:
+            expected_related = self.source_event_id
+        else:
+            raise ValueError(
+                "candidate_event_id must match source_event_id or target_event_id"
+            )
+        if self.event_id != expected_related:
+            raise ValueError("event_id must identify the endpoint other than the candidate")
+        return self
 
 
-def test_schema_rejects_inconsistent_summary_fields():
-    store = EventStore([event("E01"), event("E02")])
-    evidence_link = link("E01", "E02", candidate="E02")
-    result = EvidenceBuilder(store).build_candidate("E02", [evidence_link])
-    data = result.model_dump()
-    data["supporting_events"] = []
-    with pytest.raises(ValidationError, match="supporting_events must match"):
-        CandidateEvidence.model_validate(data)
+class CandidateEvidence(BaseModel):
+    """All traceable evidence collected for one explicitly selected candidate.
+
+    The model and its collection fields are immutable so the summary lists cannot
+    drift out of sync with ``evidence_items`` after validation.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    candidate_event_id: str = Field(min_length=1)
+    candidate: EventSnapshot
+    supporting_events: tuple[str, ...] = Field(default_factory=tuple)
+    contradicting_events: tuple[str, ...] = Field(default_factory=tuple)
+    evidence_items: tuple[EvidenceItem, ...] = Field(default_factory=tuple)
+
+    temporal_score: float | None = Field(default=None, strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    semantic_score: float | None = Field(default=None, strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    dependency_score: float | None = Field(default=None, strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    severity_score: float | None = Field(default=None, strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+    contradiction_score: float | None = Field(default=None, strict=True, ge=0.0, le=1.0, allow_inf_nan=False)
+
+    @field_validator("candidate_event_id")
+    @classmethod
+    def validate_candidate_id(cls, value: str) -> str:
+        return _validate_identifier(value, "candidate_event_id")
+
+    @model_validator(mode="after")
+    def validate_summary_fields(self) -> "CandidateEvidence":
+        if self.candidate_event_id != self.candidate.event_id:
+            raise ValueError("candidate_event_id must equal candidate.event_id")
+        if any(item.candidate_event_id != self.candidate_event_id for item in self.evidence_items):
+            raise ValueError("every evidence item must belong to candidate_event_id")
+
+        fingerprints = [
+            json.dumps(
+                item.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            for item in self.evidence_items
+        ]
+        if len(fingerprints) != len(set(fingerprints)):
+            raise ValueError("evidence_items must not contain exact duplicate records")
+
+        expected_support = tuple(
+            sorted(
+                {item.event_id for item in self.evidence_items if item.polarity == "supporting"}
+            )
+        )
+        expected_contradiction = tuple(
+            sorted(
+                {item.event_id for item in self.evidence_items if item.polarity == "contradicting"}
+            )
+        )
+        if self.supporting_events != expected_support:
+            raise ValueError("supporting_events must match supporting evidence_items")
+        if self.contradicting_events != expected_contradiction:
+            raise ValueError("contradicting_events must match contradicting evidence_items")
+
+        expected_scores = {
+            "temporal_score": self._max_score(EvidenceType.TEMPORAL, "supporting"),
+            "semantic_score": self._max_score(EvidenceType.SEMANTIC, "supporting"),
+            "dependency_score": self._max_score(EvidenceType.DEPENDENCY, "supporting"),
+            "contradiction_score": self._max_score_any_polarity("contradicting"),
+        }
+        for field_name, expected in expected_scores.items():
+            if getattr(self, field_name) != expected:
+                raise ValueError(f"{field_name} must match the scores in evidence_items")
+        return self
+
+    def _max_score(self, evidence_type: EvidenceType, polarity: str) -> float | None:
+        scores = [
+            item.score
+            for item in self.evidence_items
+            if item.evidence_type == evidence_type and item.polarity == polarity
+        ]
+        return max(scores) if scores else None
+
+    def _max_score_any_polarity(self, polarity: str) -> float | None:
+        scores = [item.score for item in self.evidence_items if item.polarity == polarity]
+        return max(scores) if scores else None
 
 
-def test_candidate_schema_rejects_duplicate_evidence_records():
-    builder = make_builder("E01", "E02")
-    evidence_link = link("E01", "E02", candidate="E02")
-    result = builder.build_candidate("E02", [evidence_link])
-    data = result.model_dump()
-    data["evidence_items"] = data["evidence_items"] * 2
-    with pytest.raises(ValidationError, match="exact duplicate records"):
-        CandidateEvidence.model_validate(data)
+class EvidencePackage(BaseModel):
+    """Incident-level evidence package passed to downstream RCA stages.
 
+    The candidate collection is a tuple so a validated package cannot be changed
+    in place after construction.
+    """
 
-def test_package_rejects_duplicate_candidate_ids():
-    snapshot = EventStore([event("E01")]).require("E01")
-    candidate = CandidateEvidence(candidate_event_id="E01", candidate=snapshot)
-    with pytest.raises(ValidationError, match="must be unique"):
-        EvidencePackage(incident_id="INC-1", candidates=[candidate, candidate])
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
+    schema_version: int = Field(default=1, ge=1)
+    incident_id: str = Field(min_length=1)
+    candidates: tuple[CandidateEvidence, ...] = Field(default_factory=tuple)
 
-def test_package_json_round_trip():
-    builder = make_builder("E01", "E02")
-    package = builder.build_package("INC-1", ["E02"], [link("E01", "E02", candidate="E02")])
-    restored = EvidencePackage.model_validate_json(package.model_dump_json())
-    assert restored == package
+    @field_validator("incident_id")
+    @classmethod
+    def validate_incident_id(cls, value: str) -> str:
+        return _validate_identifier(value, "incident_id")
 
-
-def test_candidate_evidence_collections_are_immutable():
-    result = make_builder("E01", "E02").build_candidate(
-        "E02",
-        [link("E01", "E02", candidate="E02")],
-    )
-
-    with pytest.raises(AttributeError):
-        result.supporting_events.clear()
-
-    with pytest.raises(AttributeError):
-        result.evidence_items.append(result.evidence_items[0])
-
-    with pytest.raises(ValidationError):
-        result.supporting_events = ()
-
-
-def test_evidence_package_candidates_are_immutable():
-    package = make_builder("E01").build_package("INC-1", ["E01"], [])
-
-    with pytest.raises(AttributeError):
-        package.candidates.append(package.candidates[0])
-
-    with pytest.raises(ValidationError):
-        package.candidates = ()
+    @model_validator(mode="after")
+    def reject_duplicate_candidates(self) -> "EvidencePackage":
+        ids = [candidate.candidate_event_id for candidate in self.candidates]
+        if len(ids) != len(set(ids)):
+            raise ValueError("candidate_event_id values must be unique within an evidence package")
+        return self
