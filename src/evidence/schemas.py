@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from enum import StrEnum
+from enum import Enum
 from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-class EvidenceType(StrEnum):
+class EvidenceType(str, Enum):
     """Kind of signal represented by an evidence relationship."""
 
     TEMPORAL = "temporal"
@@ -27,6 +27,67 @@ def _validate_identifier(value: str, field_name: str) -> str:
         raise ValueError(f"{field_name} must not be blank")
     if value != value.strip():
         raise ValueError(f"{field_name} must not have leading or trailing whitespace")
+    return value
+
+
+class _FrozenDict(dict):
+    """A JSON-serializable dict that rejects in-place mutation."""
+
+    @staticmethod
+    def _immutable(*args: Any, **kwargs: Any) -> None:
+        raise TypeError("evidence metadata is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]):
+        memo[id(self)] = self
+        return self
+
+
+class _FrozenList(list):
+    """A JSON-serializable list that rejects in-place mutation."""
+
+    @staticmethod
+    def _immutable(*args: Any, **kwargs: Any) -> None:
+        raise TypeError("evidence metadata is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    append = _immutable
+    clear = _immutable
+    extend = _immutable
+    insert = _immutable
+    pop = _immutable
+    remove = _immutable
+    reverse = _immutable
+    sort = _immutable
+    __iadd__ = _immutable
+    __imul__ = _immutable
+
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memo: dict[int, Any]):
+        memo[id(self)] = self
+        return self
+
+
+def _freeze_json(value: Any) -> Any:
+    """Recursively freeze JSON containers while preserving JSON serialization."""
+    if isinstance(value, dict):
+        return _FrozenDict({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return _FrozenList(_freeze_json(item) for item in value)
     return value
 
 
@@ -83,10 +144,13 @@ class EventSnapshot(BaseModel):
         if value != value.strip() or not ("T" in value or " " in value):
             raise ValueError("timestamp_iso must be a valid ISO-8601 datetime")
         try:
-            # Python's ISO parser accepts offsets and the common terminal Z form.
-            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            # Match Member 1's canonical LogEvent contract: timestamps must be
+            # timezone-aware so temporal comparisons never mix local/UTC values.
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as exc:
             raise ValueError("timestamp_iso must be a valid ISO-8601 datetime") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("timestamp_iso must include a UTC offset")
         return value
 
 
@@ -124,6 +188,11 @@ class EvidenceLink(BaseModel):
     def validate_metadata(cls, value: Any) -> dict[str, Any]:
         return _copy_json_object(value)
 
+    @field_validator("metadata", mode="after")
+    @classmethod
+    def freeze_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _freeze_json(value)
+
     @model_validator(mode="after")
     def validate_relationship(self) -> "EvidenceLink":
         if self.source_event_id == self.target_event_id:
@@ -132,6 +201,10 @@ class EvidenceLink(BaseModel):
             raise ValueError(
                 "candidate_event_id must match source_event_id or target_event_id"
             )
+        # Freeze at model-validation time as well as field-validation time.
+        # This guarantees that the final value stored by Pydantic is deeply
+        # immutable even if a Pydantic version normalizes dict subclasses.
+        object.__setattr__(self, "metadata", _freeze_json(self.metadata))
         return self
 
 
@@ -169,6 +242,11 @@ class EvidenceItem(BaseModel):
     def validate_metadata(cls, value: Any) -> dict[str, Any]:
         return _copy_json_object(value)
 
+    @field_validator("metadata", mode="after")
+    @classmethod
+    def freeze_metadata(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _freeze_json(value)
+
     @model_validator(mode="after")
     def validate_relationship(self) -> "EvidenceItem":
         if self.source_event_id == self.target_event_id:
@@ -183,6 +261,8 @@ class EvidenceItem(BaseModel):
             )
         if self.event_id != expected_related:
             raise ValueError("event_id must identify the endpoint other than the candidate")
+        # Ensure nested dict/list containers remain immutable after validation.
+        object.__setattr__(self, "metadata", _freeze_json(self.metadata))
         return self
 
 

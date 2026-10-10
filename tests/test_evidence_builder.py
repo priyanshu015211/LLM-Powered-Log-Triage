@@ -13,7 +13,7 @@ from src.evidence import (
 )
 
 
-def event(event_id, *, timestamp="2026-10-08T10:00:00", service="api", line=None):
+def event(event_id, *, timestamp="2026-10-08T10:00:00+00:00", service="api", line=None):
     """Canonical LogEvent-shaped fixture without importing Member 1's module."""
     if line is None:
         try:
@@ -56,7 +56,7 @@ def test_event_store_preserves_traceable_ids_and_safe_snapshot():
     store = EventStore([event("E01")])
     snapshot = store.require("E01")
     assert snapshot.event_id == "E01"
-    assert snapshot.timestamp_iso == "2026-10-08T10:00:00"
+    assert snapshot.timestamp_iso == "2026-10-08T10:00:00+00:00"
     assert snapshot.service == "api"
     assert snapshot.message == "message for E01"
     assert not hasattr(snapshot, "raw_message")
@@ -84,6 +84,11 @@ def test_event_store_rejects_malformed_timestamp():
         EventStore([event("E01", timestamp="yesterday")])
     with pytest.raises(ValidationError, match="ISO-8601"):
         EventStore([event("E01", timestamp="2026-10-08")])
+
+
+def test_event_store_rejects_timestamp_without_utc_offset():
+    with pytest.raises(ValidationError, match="UTC offset"):
+        EventStore([event("E01", timestamp="2026-10-08T10:00:00")])
 
 
 def test_event_store_rejects_boolean_line_number():
@@ -310,3 +315,91 @@ def test_evidence_package_candidates_are_immutable():
 
     with pytest.raises(ValidationError):
         package.candidates = ()
+
+
+def test_event_store_loads_member1_events_jsonl(tmp_path):
+    import json
+    path = tmp_path / "events.jsonl"
+    record = {
+        "event_id": "evt_0123456789abcdef",
+        "timestamp_iso": "2026-10-08T10:00:00+00:00",
+        "severity": "ERROR",
+        "service": "checkout",
+        "message": "checkout request timed out",
+        "template": None,
+        "source_file": "checkout.log",
+        "line_number": 17,
+        "raw": "raw sensitive content should not be copied",
+    }
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    store = EventStore.from_jsonl(path)
+    snapshot = store.require(record["event_id"])
+    assert snapshot.service == "checkout"
+    assert not hasattr(snapshot, "raw")
+
+
+def test_event_store_jsonl_rejects_malformed_line(tmp_path):
+    path = tmp_path / "events.jsonl"
+    first_record = '{"event_id": "E01", "message": "valid event", "timestamp_iso": "2026-10-08T10:00:00+00:00"}'
+    path.write_text(first_record + "\nnot-json\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"Invalid JSONL record at .*events.jsonl:2:"):
+        EventStore.from_jsonl(path)
+
+
+def test_evidence_metadata_is_deeply_immutable_and_still_json_serializable():
+    builder = make_builder("E01", "E02")
+    metadata = {"path": {"hops": ["api", "database"]}}
+    evidence_link = link("E01", "E02", candidate="E02", metadata=metadata)
+    metadata["path"]["hops"].append("mutated-external")
+    assert evidence_link.metadata["path"]["hops"] == ["api", "database"]
+    with pytest.raises(TypeError, match="immutable"):
+        evidence_link.metadata["new_key"] = "mutated"
+    with pytest.raises(TypeError, match="immutable"):
+        evidence_link.metadata["path"]["hops"].append("mutated-in-place")
+    item_json = evidence_link.model_dump_json()
+    assert '"hops":["api","database"]' in item_json
+    # Immutable metadata remains compatible with Pydantic's deep-copy API.
+    assert evidence_link.model_copy(deep=True).model_dump_json() == item_json
+    result = builder.build_candidate("E02", [evidence_link])
+    assert result.evidence_items[0].metadata["path"]["hops"] == ["api", "database"]
+
+
+def test_event_store_jsonl_reports_schema_error_with_line_number(tmp_path):
+    import json
+
+    path = tmp_path / "events.jsonl"
+    valid = {
+        "event_id": "E01",
+        "timestamp_iso": "2026-10-08T10:00:00+00:00",
+        "service": "checkout",
+        "severity": "ERROR",
+        "message": "checkout timed out",
+    }
+    invalid = {"event_id": "E02", "service": "checkout"}  # Missing message.
+    path.write_text(
+        json.dumps(valid) + "\n" + json.dumps(invalid) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"Invalid event at .*events.jsonl:2:.*message"):
+        EventStore.from_jsonl(path)
+
+
+def test_event_store_jsonl_duplicate_id_error_has_line_number(tmp_path):
+    import json
+
+    path = tmp_path / "events.jsonl"
+    record = {
+        "event_id": "E01",
+        "timestamp_iso": "2026-10-08T10:00:00+00:00",
+        "service": "checkout",
+        "severity": "ERROR",
+        "message": "checkout timed out",
+    }
+    path.write_text(
+        json.dumps(record) + "\n" + json.dumps(record) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"Duplicate event_id 'E01' at .*events.jsonl:2"):
+        EventStore.from_jsonl(path)
