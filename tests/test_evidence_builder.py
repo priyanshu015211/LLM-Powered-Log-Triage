@@ -335,7 +335,8 @@ def test_event_store_loads_member1_events_jsonl(tmp_path):
 
 def test_event_store_jsonl_rejects_malformed_line(tmp_path):
     path = tmp_path / "events.jsonl"
-    path.write_text('{"event_id": "E01"}\nnot-json\n', encoding="utf-8")
+    first_record = '{"event_id": "E01", "message": "valid event", "timestamp_iso": "2026-10-08T10:00:00+00:00"}'
+    path.write_text(first_record + "\nnot-json\n", encoding="utf-8")
     with pytest.raises(ValueError, match=r"Invalid JSONL record at .*events.jsonl:2:"):
         EventStore.from_jsonl(path)
 
@@ -356,3 +357,44 @@ def test_evidence_metadata_is_deeply_immutable_and_still_json_serializable():
     assert evidence_link.model_copy(deep=True).model_dump_json() == item_json
     result = builder.build_candidate("E02", [evidence_link])
     assert result.evidence_items[0].metadata["path"]["hops"] == ["api", "database"]
+
+
+def test_event_store_jsonl_reports_schema_error_with_line_number(tmp_path):
+    import json
+
+    path = tmp_path / "events.jsonl"
+    valid = {
+        "event_id": "E01",
+        "timestamp_iso": "2026-10-08T10:00:00+00:00",
+        "service": "checkout",
+        "severity": "ERROR",
+        "message": "checkout timed out",
+    }
+    invalid = {"event_id": "E02", "service": "checkout"}  # Missing message.
+    path.write_text(
+        json.dumps(valid) + "\n" + json.dumps(invalid) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"Invalid event at .*events.jsonl:2:.*message"):
+        EventStore.from_jsonl(path)
+
+
+def test_event_store_jsonl_duplicate_id_error_has_line_number(tmp_path):
+    import json
+
+    path = tmp_path / "events.jsonl"
+    record = {
+        "event_id": "E01",
+        "timestamp_iso": "2026-10-08T10:00:00+00:00",
+        "service": "checkout",
+        "severity": "ERROR",
+        "message": "checkout timed out",
+    }
+    path.write_text(
+        json.dumps(record) + "\n" + json.dumps(record) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"Duplicate event_id 'E01' at .*events.jsonl:2"):
+        EventStore.from_jsonl(path)
