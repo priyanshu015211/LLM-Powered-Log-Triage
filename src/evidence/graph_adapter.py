@@ -18,6 +18,8 @@ class DirectedGraphLike(Protocol):
     nodes: Any
     edges: Any
 
+    def is_directed(self) -> bool: ...
+
     def has_edge(self, u: Any, v: Any) -> bool: ...
 
     def get_edge_data(self, u: Any, v: Any, default: Any = None) -> Any: ...
@@ -65,16 +67,30 @@ def _metadata_copy(value: Any) -> dict[str, Any]:
 
 
 
+def _require_directed_graph(graph: DirectedGraphLike, graph_name: str) -> None:
+    """Reject graph inputs whose edge direction cannot be trusted."""
+    is_directed = getattr(graph, "is_directed", None)
+    if not callable(is_directed) or not is_directed():
+        raise ValueError(f"{graph_name} must be a directed graph")
+
+
 def _validate_time_delta(value: Any) -> float:
-    """Validate a temporal edge delta before retaining it as evidence metadata."""
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(value)
-        or value < 0
-    ):
-        raise ValueError("time_delta_seconds must be a finite non-negative number")
-    return float(value)
+    """Validate and normalize a temporal edge delta as a finite float."""
+    error = "time_delta_seconds must be a finite non-negative number"
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(error)
+
+    # math.isfinite(value) can itself raise OverflowError for huge Python ints.
+    # Convert under an exception boundary, then validate the normalized float.
+    try:
+        normalized = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(error) from exc
+
+    if not math.isfinite(normalized) or normalized < 0:
+        raise ValueError(error)
+    return normalized
+
 
 def _set_graph_metadata(
     metadata: dict[str, Any], values: Mapping[str, Any]
@@ -97,6 +113,7 @@ def temporal_links_from_graph(
     Reversed edges are not silently considered equivalent. ``polarity`` remains
     relative to the candidate named by the annotation, not to the edge source.
     """
+    _require_directed_graph(temporal_graph, "temporal_graph")
     result: list[EvidenceLink] = []
     for raw in annotations:
         ann = _annotation(raw)
@@ -148,6 +165,8 @@ def dependency_links_from_graphs(
     ``checkout -> database``). The output event edge is normalized to that same
     direction regardless of input endpoint order. Polarity is never inferred.
     """
+    _require_directed_graph(temporal_graph, "temporal_graph")
+    _require_directed_graph(dependency_graph, "dependency_graph")
     result: list[EvidenceLink] = []
     for raw in annotations:
         ann = _annotation(raw)
