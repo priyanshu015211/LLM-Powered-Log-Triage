@@ -310,3 +310,49 @@ def test_evidence_package_candidates_are_immutable():
 
     with pytest.raises(ValidationError):
         package.candidates = ()
+
+
+def test_event_store_loads_member1_events_jsonl(tmp_path):
+    import json
+    path = tmp_path / "events.jsonl"
+    record = {
+        "event_id": "evt_0123456789abcdef",
+        "timestamp_iso": "2026-10-08T10:00:00+00:00",
+        "severity": "ERROR",
+        "service": "checkout",
+        "message": "checkout request timed out",
+        "template": None,
+        "source_file": "checkout.log",
+        "line_number": 17,
+        "raw": "raw sensitive content should not be copied",
+    }
+    path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    store = EventStore.from_jsonl(path)
+    snapshot = store.require(record["event_id"])
+    assert snapshot.service == "checkout"
+    assert not hasattr(snapshot, "raw")
+
+
+def test_event_store_jsonl_rejects_malformed_line(tmp_path):
+    path = tmp_path / "events.jsonl"
+    path.write_text('{"event_id": "E01"}\nnot-json\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"Invalid JSONL record at .*events.jsonl:2:"):
+        EventStore.from_jsonl(path)
+
+
+def test_evidence_metadata_is_deeply_immutable_and_still_json_serializable():
+    builder = make_builder("E01", "E02")
+    metadata = {"path": {"hops": ["api", "database"]}}
+    evidence_link = link("E01", "E02", candidate="E02", metadata=metadata)
+    metadata["path"]["hops"].append("mutated-external")
+    assert evidence_link.metadata["path"]["hops"] == ["api", "database"]
+    with pytest.raises(TypeError, match="immutable"):
+        evidence_link.metadata["new_key"] = "mutated"
+    with pytest.raises(TypeError, match="immutable"):
+        evidence_link.metadata["path"]["hops"].append("mutated-in-place")
+    item_json = evidence_link.model_dump_json()
+    assert '"hops":["api","database"]' in item_json
+    # Immutable metadata remains compatible with Pydantic's deep-copy API.
+    assert evidence_link.model_copy(deep=True).model_dump_json() == item_json
+    result = builder.build_candidate("E02", [evidence_link])
+    assert result.evidence_items[0].metadata["path"]["hops"] == ["api", "database"]
