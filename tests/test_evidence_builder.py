@@ -13,7 +13,7 @@ from src.evidence import (
 )
 
 
-def event(event_id, *, timestamp="2026-10-08T10:00:00", service="api", line=None):
+def event(event_id, *, timestamp="2026-10-08T10:00:00+00:00", service="api", line=None):
     """Canonical LogEvent-shaped fixture without importing Member 1's module."""
     if line is None:
         try:
@@ -56,7 +56,7 @@ def test_event_store_preserves_traceable_ids_and_safe_snapshot():
     store = EventStore([event("E01")])
     snapshot = store.require("E01")
     assert snapshot.event_id == "E01"
-    assert snapshot.timestamp_iso == "2026-10-08T10:00:00"
+    assert snapshot.timestamp_iso == "2026-10-08T10:00:00+00:00"
     assert snapshot.service == "api"
     assert snapshot.message == "message for E01"
     assert not hasattr(snapshot, "raw_message")
@@ -84,6 +84,11 @@ def test_event_store_rejects_malformed_timestamp():
         EventStore([event("E01", timestamp="yesterday")])
     with pytest.raises(ValidationError, match="ISO-8601"):
         EventStore([event("E01", timestamp="2026-10-08")])
+
+
+def test_event_store_rejects_timestamp_without_utc_offset():
+    with pytest.raises(ValidationError, match="UTC offset"):
+        EventStore([event("E01", timestamp="2026-10-08T10:00:00")])
 
 
 def test_event_store_rejects_boolean_line_number():
