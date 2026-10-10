@@ -195,3 +195,48 @@ def test_temporal_adapter_rejects_invalid_annotated_time_delta():
             graph,
             [annotation("early", "late", "late", metadata={"time_delta_seconds": -0.1})],
         )
+
+
+def test_temporal_adapter_rejects_undirected_graph():
+    graph = nx.Graph()
+    graph.add_edge("early", "late", time_delta_seconds=1.0)
+
+    with pytest.raises(ValueError, match="temporal_graph must be a directed graph"):
+        temporal_links_from_graph(graph, [annotation("early", "late", "late")])
+
+
+def test_dependency_adapter_rejects_undirected_event_graph():
+    events = nx.Graph()
+    events.add_node("checkout-event", service="checkout")
+    events.add_node("db-event", service="database")
+    dependencies = nx.DiGraph()
+    dependencies.add_edge("checkout", "database")
+
+    with pytest.raises(ValueError, match="temporal_graph must be a directed graph"):
+        dependency_links_from_graphs(
+            events, dependencies, [annotation("checkout-event", "db-event", "db-event")]
+        )
+
+
+def test_dependency_adapter_rejects_undirected_service_graph():
+    events = nx.DiGraph()
+    events.add_node("checkout-event", service="checkout")
+    events.add_node("db-event", service="database")
+    dependencies = nx.Graph()
+    dependencies.add_edge("checkout", "database")
+
+    with pytest.raises(ValueError, match="dependency_graph must be a directed graph"):
+        dependency_links_from_graphs(
+            events, dependencies, [annotation("checkout-event", "db-event", "db-event")]
+        )
+
+
+def test_temporal_adapter_rejects_integer_time_delta_too_large_for_float():
+    graph = nx.DiGraph()
+    graph.add_edge("early", "late", time_delta_seconds=10**1000)
+
+    with pytest.raises(
+        ValueError,
+        match="time_delta_seconds must be a finite non-negative number",
+    ):
+        temporal_links_from_graph(graph, [annotation("early", "late", "late")])
