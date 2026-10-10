@@ -178,3 +178,20 @@ def test_dependency_adapter_rejects_metadata_that_disagrees_with_dependency_grap
                 metadata={"source_service": "payment"},
             )],
         )
+
+
+def test_temporal_adapter_rejects_invalid_graph_time_deltas():
+    for bad_delta in (-1.0, float("nan"), float("inf"), True, "1.0"):
+        graph = nx.DiGraph()
+        graph.add_edge("early", "late", time_delta_seconds=bad_delta)
+        with pytest.raises(ValueError, match="time_delta_seconds must be a finite non-negative number"):
+            temporal_links_from_graph(graph, [annotation("early", "late", "late")])
+
+def test_temporal_adapter_rejects_invalid_annotated_time_delta():
+    graph = nx.DiGraph()
+    graph.add_edge("early", "late")
+    with pytest.raises(ValueError, match="time_delta_seconds must be a finite non-negative number"):
+        temporal_links_from_graph(
+            graph,
+            [annotation("early", "late", "late", metadata={"time_delta_seconds": -0.1})],
+        )

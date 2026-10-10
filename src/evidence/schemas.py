@@ -144,10 +144,13 @@ class EventSnapshot(BaseModel):
         if value != value.strip() or not ("T" in value or " " in value):
             raise ValueError("timestamp_iso must be a valid ISO-8601 datetime")
         try:
-            # Python's ISO parser accepts offsets and the common terminal Z form.
-            datetime.fromisoformat(value.replace("Z", "+00:00"))
+            # Match Member 1's canonical LogEvent contract: timestamps must be
+            # timezone-aware so temporal comparisons never mix local/UTC values.
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as exc:
             raise ValueError("timestamp_iso must be a valid ISO-8601 datetime") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise ValueError("timestamp_iso must include a UTC offset")
         return value
 
 

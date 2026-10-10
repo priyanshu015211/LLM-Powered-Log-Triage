@@ -8,6 +8,7 @@ only a small set of useful graph attributes.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+import math
 from typing import Any, Protocol
 
 from .schemas import EvidenceLink, EvidenceType
@@ -62,6 +63,19 @@ def _metadata_copy(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
+
+
+def _validate_time_delta(value: Any) -> float:
+    """Validate a temporal edge delta before retaining it as evidence metadata."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError("time_delta_seconds must be a finite non-negative number")
+    return float(value)
+
 def _set_graph_metadata(
     metadata: dict[str, Any], values: Mapping[str, Any]
 ) -> None:
@@ -95,8 +109,15 @@ def temporal_links_from_graph(
         edge = temporal_graph.get_edge_data(source, target, default={}) or {}
         metadata = _metadata_copy(ann.get("metadata"))
         graph_metadata: dict[str, Any] = {}
-        if "time_delta_seconds" in edge:
-            graph_metadata["time_delta_seconds"] = edge["time_delta_seconds"]
+        # Validate any provided delta as well as the graph's authoritative value.
+        if "time_delta_seconds" in metadata:
+            metadata["time_delta_seconds"] = _validate_time_delta(
+                metadata["time_delta_seconds"]
+            )
+        if edge.get("time_delta_seconds") is not None:
+            graph_metadata["time_delta_seconds"] = _validate_time_delta(
+                edge["time_delta_seconds"]
+            )
         if edge.get("relationship") is not None:
             graph_metadata["graph_relationship"] = str(edge["relationship"])
         _set_graph_metadata(metadata, graph_metadata)

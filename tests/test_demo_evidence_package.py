@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 from examples.demo_evidence_package import build_demo_package
 from src.evidence import EvidencePackage
 
@@ -31,3 +34,10 @@ def test_demo_is_deterministic():
     first = build_demo_package().model_dump_json()
     second = build_demo_package().model_dump_json()
     assert first == second
+
+
+def test_checked_in_sample_matches_demo_output():
+    sample_path = Path(__file__).resolve().parents[1] / "examples" / "sample_evidence_package.json"
+    checked_in_sample = json.loads(sample_path.read_text(encoding="utf-8"))
+    generated_sample = json.loads(build_demo_package().model_dump_json(indent=2))
+    assert checked_in_sample == generated_sample
