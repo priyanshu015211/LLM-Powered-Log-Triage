@@ -1,13 +1,16 @@
-"""Run a deterministic synthetic evidence-package demo (not a research result).
+"""Run a deterministic synthetic evidence-package demo, not a research result.
 
-Usage from the repository root:
-    python examples/demo_evidence_package.py
-    python examples/demo_evidence_package.py --output outputs/demo/evidence_package.json
+Run from the repository root with::
+
+    python -m examples.demo_evidence_package
+    python -m examples.demo_evidence_package --output outputs/demo/evidence_package.json
+
+All polarities and scores below are manually authored synthetic annotations.
+They are demonstration inputs, not model predictions or measured results.
 """
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 import networkx as nx
@@ -29,8 +32,14 @@ TIMES = {
 
 
 def build_demo_package():
-    """Construct events, graph context, explicitly annotated links, and package."""
-    id_by_name = {
+    """Build example evidence for two possible root-cause event candidates.
+
+    Candidate E01 is a database pool-exhaustion error. Candidate E03 is a
+    checkout timeout. E04 is treated as an observed downstream symptom, not a
+    root-cause candidate. The annotations are illustrative and intentionally
+    do not claim to establish the real cause.
+    """
+    ids = {
         "db_error": "evt_0000000000000001",
         "health_probe": "evt_0000000000000002",
         "checkout_timeout": "evt_0000000000000003",
@@ -42,43 +51,45 @@ def build_demo_package():
         "checkout_timeout": ("checkout", "ERROR", "checkout request timed out"),
         "payment_failure": ("payment", "ERROR", "payment failed after checkout timeout"),
     }
+
     records = []
     for line_number, name in enumerate(TIMES, start=1):
         service, severity, message = details[name]
-        records.append({
-            "event_id": id_by_name[name],
-            "timestamp_iso": TIMES[name],
-            "severity": severity,
-            "service": service,
-            "message": message,
-            "template": message,
-            "source_file": "synthetic_incident.log",
-            "line_number": line_number,
-        })
+        records.append(
+            {
+                "event_id": ids[name],
+                "timestamp_iso": TIMES[name],
+                "severity": severity,
+                "service": service,
+                "message": message,
+                "template": message,
+                "source_file": "synthetic_incident.log",
+                "line_number": line_number,
+            }
+        )
     store = EventStore(records)
 
-    # Same node/edge contract as Member 2's TemporalEventGraph and
-    # ServiceDependencyGraph: event nodes carry service; temporal edges preserve
-    # earlier -> later; dependency edge is consumer -> provider.
+    # The temporal graph points from earlier to later events. The service
+    # dependency graph points from consumer to provider (checkout -> database).
     temporal = nx.DiGraph()
     for name, (service, severity, message) in details.items():
         temporal.add_node(
-            id_by_name[name],
+            ids[name],
             timestamp=TIMES[name],
             service=service,
             level=severity,
             message=message,
         )
     temporal.add_edge(
-        id_by_name["db_error"], id_by_name["health_probe"],
+        ids["db_error"], ids["health_probe"],
         time_delta_seconds=1.0, relationship="temporal_precedence",
     )
     temporal.add_edge(
-        id_by_name["health_probe"], id_by_name["checkout_timeout"],
+        ids["health_probe"], ids["checkout_timeout"],
         time_delta_seconds=1.0, relationship="temporal_precedence",
     )
     temporal.add_edge(
-        id_by_name["checkout_timeout"], id_by_name["payment_failure"],
+        ids["checkout_timeout"], ids["payment_failure"],
         time_delta_seconds=1.0, relationship="temporal_precedence",
     )
 
@@ -86,53 +97,76 @@ def build_demo_package():
     dependencies.add_edge("checkout", "database", relationship="service_dependency")
     dependencies.add_edge("payment", "checkout", relationship="service_dependency")
 
-    temporal_links = temporal_links_from_graph(temporal, [
+    temporal_links = temporal_links_from_graph(
+        temporal,
+        [
+            {
+                "source_event_id": ids["db_error"],
+                "target_event_id": ids["health_probe"],
+                "candidate_event_id": ids["db_error"],
+                "polarity": "contradicting",
+                "score": 0.62,
+                "reason": (
+                    "The database health probe succeeded immediately after the "
+                    "pool-exhaustion error. This is counterevidence to a sustained "
+                    "database-unavailable hypothesis, though it does not rule out "
+                    "an intermittent database problem."
+                ),
+            },
+            {
+                "source_event_id": ids["checkout_timeout"],
+                "target_event_id": ids["payment_failure"],
+                "candidate_event_id": ids["checkout_timeout"],
+                "polarity": "supporting",
+                "score": 0.88,
+                "reason": (
+                    "The checkout timeout precedes the payment failure, whose "
+                    "message explicitly reports failure after the timeout."
+                ),
+            },
+        ],
+    )
+
+    dependency_annotations = [
         {
-            "source_event_id": id_by_name["health_probe"],
-            "target_event_id": id_by_name["checkout_timeout"],
-            "candidate_event_id": id_by_name["checkout_timeout"],
-            "polarity": "contradicting",
-            "score": 0.62,
-            "reason": (
-                "A successful database health probe immediately preceded the timeout; "
-                "this is counterevidence to a sustained-outage explanation, not proof against it."
-            ),
-        },
-        {
-            "source_event_id": id_by_name["checkout_timeout"],
-            "target_event_id": id_by_name["payment_failure"],
-            "candidate_event_id": id_by_name["payment_failure"],
-            "polarity": "supporting",
-            "score": 0.88,
-            "reason": "The payment failure followed the checkout timeout in the synthetic timeline.",
-        },
-    ])
-    dependency_links = dependency_links_from_graphs(temporal, dependencies, [
-        {
-            # Candidate first; adapter preserves consumer -> dependency direction.
-            "source_event_id": id_by_name["checkout_timeout"],
-            "target_event_id": id_by_name["db_error"],
-            "candidate_event_id": id_by_name["checkout_timeout"],
+            "source_event_id": ids["checkout_timeout"],
+            "target_event_id": ids["db_error"],
+            "candidate_event_id": ids["db_error"],
             "polarity": "supporting",
             "score": 0.91,
             "reason": (
                 "The checkout service depends on the database, and the database "
-                "logged pool exhaustion earlier in this synthetic incident."
+                "logged pool exhaustion before the checkout timeout. This supports "
+                "the database error as an upstream-cause candidate in this synthetic case."
             ),
         },
-    ])
+        {
+            "source_event_id": ids["checkout_timeout"],
+            "target_event_id": ids["db_error"],
+            "candidate_event_id": ids["checkout_timeout"],
+            "polarity": "contradicting",
+            "score": 0.91,
+            "reason": (
+                "The database pool-exhaustion error occurs in a service that the "
+                "checkout service depends on, making the checkout timeout less "
+                "plausible as the initiating root-cause event."
+            ),
+        },
+    ]
+    dependency_links = dependency_links_from_graphs(
+        temporal, dependencies, dependency_annotations
+    )
 
     builder = EvidenceBuilder(store)
-    package = builder.build_package(
+    return builder.build_package(
         incident_id="SYNTHETIC-INCIDENT-001",
-        candidate_event_ids=[id_by_name["checkout_timeout"], id_by_name["payment_failure"]],
+        candidate_event_ids=[ids["db_error"], ids["checkout_timeout"]],
         evidence_links=[*temporal_links, *dependency_links],
         severity_scores={
-            id_by_name["checkout_timeout"]: 0.85,
-            id_by_name["payment_failure"]: 0.70,
+            ids["db_error"]: 0.95,
+            ids["checkout_timeout"]: 0.85,
         },
     )
-    return package
 
 
 def main() -> int:
@@ -148,7 +182,10 @@ def main() -> int:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(package.model_dump_json(indent=2) + "\n", encoding="utf-8")
     print(f"Wrote synthetic evidence package: {args.output}")
-    print(f"Candidates: {len(package.candidates)}; evidence items: {sum(len(c.evidence_items) for c in package.candidates)}")
+    print(
+        f"Candidates: {len(package.candidates)}; evidence items: "
+        f"{sum(len(candidate.evidence_items) for candidate in package.candidates)}"
+    )
     print("DEMO ONLY: these synthetic annotations are not measured RCA results.")
     return 0
 

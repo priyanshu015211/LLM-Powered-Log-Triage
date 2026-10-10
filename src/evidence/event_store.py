@@ -85,31 +85,51 @@ class EventStore:
 
     @classmethod
     def from_jsonl(cls, path: str | Path) -> "EventStore":
-        """Load Member 1's ``events.jsonl`` artifact with line-aware errors.
+        """Load ``events.jsonl`` with file-and-line-aware validation errors.
 
-        Additional fields emitted by ``LogEvent.to_record()`` are ignored by
-        the snapshot boundary; the canonical evidence fields are validated.
-        Blank lines are rejected rather than silently dropping potentially lost
-        records.
+        Each record is validated while its source line is known. Raw fields and
+        unneeded parser metadata are discarded by ``_to_snapshot``.
+        Blank lines and duplicate IDs are rejected explicitly so no records are
+        silently lost.
         """
         source = Path(path)
-        records: list[Mapping[str, Any]] = []
+        snapshots: dict[str, EventSnapshot] = {}
         with source.open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 if not line.strip():
-                    raise ValueError(f"Blank JSONL record at {source}:{line_number}")
+                    raise ValueError(
+                        f"Blank JSONL record at {source}:{line_number}"
+                    )
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError as exc:
                     raise ValueError(
                         f"Invalid JSONL record at {source}:{line_number}: {exc.msg}"
                     ) from exc
+
                 if not isinstance(record, Mapping):
                     raise ValueError(
-                        f"JSONL record at {source}:{line_number} must be a JSON object"
+                        f"Invalid JSONL record at {source}:{line_number}: "
+                        "expected a JSON object"
                     )
-                records.append(record)
-        return cls(records)
+
+                try:
+                    snapshot = cls._to_snapshot(record)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Invalid event at {source}:{line_number}: {exc}"
+                    ) from exc
+
+                if snapshot.event_id in snapshots:
+                    raise ValueError(
+                        f"Duplicate event_id {snapshot.event_id!r} "
+                        f"at {source}:{line_number}"
+                    )
+                snapshots[snapshot.event_id] = snapshot
+
+        # The snapshots have already been validated; passing them through the
+        # constructor maintains a single construction path for the read-only index.
+        return cls(snapshots.values())
 
     def __len__(self) -> int:
         return len(self._events)

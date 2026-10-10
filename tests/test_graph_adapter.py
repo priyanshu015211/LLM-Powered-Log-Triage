@@ -142,3 +142,39 @@ def test_dependency_adapter_rejects_same_service_event_pair():
         dependency_links_from_graphs(
             events, dependencies, [annotation("e1", "e2", "e1")]
         )
+
+
+def test_temporal_adapter_rejects_annotation_metadata_conflicting_with_graph():
+    graph = nx.DiGraph()
+    graph.add_edge("early", "late", relationship="temporal_precedence", time_delta_seconds=2.5)
+    with pytest.raises(ValueError, match="conflicts with graph data"):
+        temporal_links_from_graph(
+            graph,
+            [annotation("early", "late", "late", metadata={"time_delta_seconds": 99.0})],
+        )
+
+
+def test_adapter_rejects_non_mapping_annotation_cleanly():
+    graph = nx.DiGraph()
+    with pytest.raises(ValueError, match="must be a mapping/object"):
+        temporal_links_from_graph(graph, [None])
+
+
+def test_dependency_adapter_rejects_metadata_that_disagrees_with_dependency_graph():
+    events = nx.DiGraph()
+    events.add_node("checkout-event", service="checkout")
+    events.add_node("db-event", service="database")
+    dependencies = nx.DiGraph()
+    dependencies.add_edge("checkout", "database", relationship="service_dependency")
+
+    with pytest.raises(ValueError, match="source_service.*conflicts with graph data"):
+        dependency_links_from_graphs(
+            events,
+            dependencies,
+            [annotation(
+                "checkout-event",
+                "db-event",
+                "db-event",
+                metadata={"source_service": "payment"},
+            )],
+        )
